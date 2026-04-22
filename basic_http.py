@@ -1,40 +1,62 @@
 import socket
 import json
-from config import HOST, PORT, ENDPOINT
-from dice_api import roll_weighted_dice, validate_probabilities, parse_http_request, build_http_response
+from dice import Dice
 
 server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-server_socket.bind((HOST, PORT))
+
+server_socket.bind(('localhost', 8081))
+
 server_socket.listen(1)
-print(f"Server is listening on {HOST}:{PORT}...")
+print("Server is listening on port 8081...")
 
 while True:
     client_socket, client_address = server_socket.accept()
-    try:
-        request = client_socket.recv(4096).decode("utf-8")
-        method, path, headers, body = parse_http_request(request)
+    print(f"Connection from {client_address} established.")
 
-        if method == "POST" and path == ENDPOINT:
-            try:
-                payload = json.loads(body)
-                probabilities = payload["probabilities"]
-                number_of_random = payload["number_of_random"]
-                results = roll_weighted_dice(probabilities, number_of_random)
-                response_body = json.dumps({"status": "success", "results": results})
-                response = build_http_response("200 OK", response_body)
-            except (ValueError, KeyError, json.JSONDecodeError) as exc:
-                response_body = json.dumps({"status": "error", "message": str(exc)})
-                response = build_http_response("400 Bad Request", response_body)
-        elif method == "GET" and path == "/myjson":
-            response_body = json.dumps({"status": "success", "message": "Hello, KU!"})
-            response = build_http_response("200 OK", response_body)
-        elif method == "GET":
-            response_body = "<html><body><h1>Hello, World!</h1></body></html>"
-            response = build_http_response("200 OK", response_body, content_type="text/html")
-        else:
-            response_body = json.dumps({"status": "error", "message": "Method not allowed"})
-            response = build_http_response("405 Method Not Allowed", response_body)
+    request = client_socket.recv(4096).decode('utf-8')
+    print(f"Request received ({len(request)}):")
+    print("*"*50)
+    print(request)
+    print("*"*50)
 
-        client_socket.sendall(response.encode("utf-8"))
-    finally:
-        client_socket.close()
+    if request.startswith("POST /roll_dice"):
+        body = request.split("\r\n\r\n", 1)[1].strip()
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError:
+            response = "HTTP/1.1 400 Bad Request\r\n\r\nInvalid JSON"
+            client_socket.sendall(response.encode('utf-8'))
+            client_socket.close()
+            continue
+
+        probabilities = payload["probabilities"]
+        n = payload["number_of_random"]
+
+        dice = Dice(sides=len(probabilities), probabilities=probabilities)
+        results = dice.roll_many(n)
+
+        response_data = {
+            "status": "success",
+            "results": results
+        }
+        response_json = json.dumps(response_data)
+        response = f"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{response_json}"
+
+    elif request.startswith("GET /myjson"):
+        response_data = {
+            "status": "success",
+            "message": "Hello, KU!"
+        }
+        response_json = json.dumps(response_data)
+        response = f"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{response_json}"
+
+    elif request.startswith("GET"):
+        response = f"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html><body><h1>Hello, World!</h1><hr>{request}</body></html>"
+
+    else:
+        response = "HTTP/1.1 405 Method Not Allowed\r\n\r\n"
+
+    client_socket.sendall(response.encode('utf-8'))
+    client_socket.close()
+
+    print("Waiting for the next TCP request...")

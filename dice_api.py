@@ -1,48 +1,92 @@
+import unittest
 import json
-import random
+import threading
+import socket
+import time
+import requests
 
-def validate_probabilities(probabilities):
-    if not isinstance(probabilities, list):
-        raise ValueError("probabilities must be a list of 6 numbers")
-    if len(probabilities) != 6:
-        raise ValueError("probabilities must have 6 elements")
-    if any(not isinstance(p, (int, float)) for p in probabilities):
-        raise ValueError("probabilities must contain numeric values")
-    if any(p < 0 or p > 1 for p in probabilities):
-        raise ValueError("probabilities values must be between 0 and 1")
-    total = sum(probabilities)
-    if abs(total - 1.0) > 1e-9:
-        raise ValueError("probabilities must sum to 1.0")
-    return probabilities
+def start_server():
+    from dice import Dice
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(('localhost', 8082))
+    srv.listen(5)
+    srv.settimeout(5)
+    while True:
+        try:
+            client_socket, _ = srv.accept()
+        except socket.timeout:
+            continue
+        request = b""
+        client_socket.settimeout(2)
+        try:
+            while True:
+                chunk = client_socket.recv(4096)
+                if not chunk:
+                    break
+                request += chunk
+        except socket.timeout:
+            pass
+        request = request.decode('utf-8')
 
-def roll_weighted_dice(probabilities, number_of_random):
-    validate_probabilities(probabilities)
-    if not isinstance(number_of_random, int) or number_of_random <= 0:
-        raise ValueError("number_of_random must be a positive integer")
-    faces = [1, 2, 3, 4, 5, 6]
-    return random.choices(faces, weights=probabilities, k=number_of_random)
+        if request.startswith("GET /roll_dice"):
+            body = request.split("\r\n\r\n", 1)[1].strip()
+            payload = json.loads(body)
+            probabilities = payload["probabilities"]
+            n = payload["number_of_random"]
+            dice = Dice(sides=len(probabilities), probabilities=probabilities)
+            results = dice.roll_many(n)
+            response_data = {"status": "success", "results": results}
+            response_json = json.dumps(response_data)
+            response = f"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{response_json}"
+        else:
+            response = "HTTP/1.1 404 Not Found\r\n\r\n"
 
-def parse_http_request(request_text):
-    lines = request_text.split("\r\n")
-    request_line = lines[0].split()
-    method = request_line[0]
-    path = request_line[1]
-    headers = {}
-    i = 1
-    while i < len(lines) and lines[i]:
-        if ":" in lines[i]:
-            key, value = lines[i].split(":", 1)
-            headers[key.strip()] = value.strip()
-        i += 1
-    body = "\r\n".join(lines[i+1:]) if i + 1 < len(lines) else ""
-    return method, path, headers, body
+        client_socket.sendall(response.encode('utf-8'))
+        client_socket.close()
 
-def build_http_response(status_line, body, content_type="application/json"):
-    body_bytes = body.encode("utf-8")
-    return (
-        f"HTTP/1.1 {status_line}\r\n"
-        f"Content-Type: {content_type}\r\n"
-        f"Content-Length: {len(body_bytes)}\r\n"
-        f"\r\n"
-        f"{body}"
-    )
+t = threading.Thread(target=start_server, daemon=True)
+t.start()
+time.sleep(0.3)
+
+class TestAPI(unittest.TestCase):
+
+    def test_status_success(self):
+        result = requests.get("http://localhost:8082/roll_dice", json={
+            "probabilities": [1/6]*6,
+            "number_of_random": 10
+        }).json()
+        self.assertEqual(result["status"], "success")
+
+    def test_results_length(self):
+        result = requests.get("http://localhost:8082/roll_dice", json={
+            "probabilities": [1/6]*6,
+            "number_of_random": 10
+        }).json()
+        self.assertEqual(len(result["results"]), 10)
+
+    def test_results_values_in_range(self):
+        result = requests.get("http://localhost:8082/roll_dice", json={
+            "probabilities": [1/6]*6,
+            "number_of_random": 60
+        }).json()
+        for v in result["results"]:
+            self.assertIn(v, [1, 2, 3, 4, 5, 6])
+
+    def test_biased_dice(self):
+        result = requests.get("http://localhost:8082/roll_dice", json={
+            "probabilities": [1, 0, 0, 0, 0, 0],
+            "number_of_random": 20
+        }).json()
+        self.assertTrue(all(v == 1 for v in result["results"]))
+
+    def test_four_sided_dice(self):
+        result = requests.get("http://localhost:8082/roll_dice", json={
+            "probabilities": [0.25, 0.25, 0.25, 0.25],
+            "number_of_random": 20
+        }).json()
+        for v in result["results"]:
+            self.assertIn(v, [1, 2, 3, 4])
+
+if __name__ == '__main__':
+    unittest.main()
